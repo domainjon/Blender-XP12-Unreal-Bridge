@@ -1,4 +1,22 @@
-# IntelliJ
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary and agent directories
+.agents/
+scratch/
+
+# IntelliJ / IDEs
 *.iml
 .idea/
+.vscode/
 out/
+
+# Blender backup files
+*.blend1
+*.blend2
+
+# OS generated
+.DS_Store
+Thumbs.db

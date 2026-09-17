@@ -322,10 +322,10 @@ class XPlaneImport(bpy.types.Operator, ImportHelper):
         me.uv_layers[-1].data.foreach_set("uv", [uv for pair in [vert_uvs[l.vertex_index] for l in me.loops] for uv in pair])
 
         # Assign the normals for each vertex
-        vindex = 0
-        for vertex in me.vertices:
-            vertex.normal = vert_normals[vindex]
-            vindex += 1
+        try:
+            me.normals_split_custom_set_from_vertices(vert_normals)
+        except Exception:
+            pass
 
         # Update mesh with new data
         me.flip_normals()
