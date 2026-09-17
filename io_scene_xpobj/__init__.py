@@ -57,6 +57,10 @@ from .import_obj8 import (
     load_texture,
     create_material_for_obj8,
 )
+from .anim_rigging import (
+    build_armature,
+    build_unified_armature,
+)
 from .import_acf import (
     ParsedACF,
     ACFAttachedObject,
@@ -131,11 +135,20 @@ if bpy is not None:
 
             try:
                 # Multi-file or single-file handling
-                if self.files and len(self.files) > 0 and self.directory:
+                if self.files and len(self.files) > 1 and self.directory:
+                    items_to_rig = []
                     for file_elem in self.files:
                         target_path = os.path.join(self.directory, file_elem.name)
                         if os.path.isfile(target_path):
-                            import_obj8_file(target_path, context=context, lod_level=target_lod)
+                            parsed = parse_obj8(target_path)
+                            mesh_obj = build_mesh(parsed, context=context, lod_level=target_lod)
+                            items_to_rig.append((parsed, mesh_obj))
+                    if items_to_rig:
+                        build_unified_armature(items_to_rig, context=context, armature_name="XPlane_Aircraft_Armature")
+                elif self.files and len(self.files) == 1 and self.directory:
+                    target_path = os.path.join(self.directory, self.files[0].name)
+                    if os.path.isfile(target_path):
+                        import_obj8_file(target_path, context=context, lod_level=target_lod)
                 elif self.filepath and os.path.isfile(self.filepath):
                     import_obj8_file(self.filepath, context=context, lod_level=target_lod)
                 else:
@@ -174,11 +187,20 @@ if bpy is not None:
 
         def execute(self, context):
             try:
-                if self.files and len(self.files) > 0 and self.directory:
+                if self.files and len(self.files) > 1 and self.directory:
+                    items_to_rig = []
                     for file_elem in self.files:
                         target_path = os.path.join(self.directory, file_elem.name)
                         if os.path.isfile(target_path):
-                            import_obj8_file(target_path, context=context, lod_level=0)
+                            parsed = parse_obj8(target_path)
+                            mesh_obj = build_mesh(parsed, context=context, lod_level=0)
+                            items_to_rig.append((parsed, mesh_obj))
+                    if items_to_rig:
+                        build_unified_armature(items_to_rig, context=context, armature_name="XPlane_Aircraft_Armature")
+                elif self.files and len(self.files) == 1 and self.directory:
+                    target_path = os.path.join(self.directory, self.files[0].name)
+                    if os.path.isfile(target_path):
+                        import_obj8_file(target_path, context=context, lod_level=0)
                 elif self.filepath and os.path.isfile(self.filepath):
                     import_obj8_file(self.filepath, context=context, lod_level=0)
                 else:

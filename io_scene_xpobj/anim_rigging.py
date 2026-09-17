@@ -55,6 +55,12 @@ from .import_obj8 import (
     AnimHideCommand,
     AnimShowCommand,
     AnimKeyframeLoopCommand,
+    mat4_identity,
+    mat4_mul,
+    mat4_translate,
+    mat4_rotate,
+    mat4_transform_point,
+    mat4_transform_vector,
 )
 
 
@@ -146,6 +152,8 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
 
     all_animated_nodes: List[AnimNode] = []
     stack: List[AnimNode] = []
+    matrix_stack: List[List[List[float]]] = [mat4_identity()]
+    active_rotate_begin_mat: Optional[Dict[str, Any]] = None
     node_counter = 0
 
     used_bone_names: Set[str] = {"root"}
@@ -177,11 +185,14 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
             parent_node.children.append(new_node)
             all_animated_nodes.append(new_node)
             stack.append(new_node)
+            matrix_stack.append([row[:] for row in matrix_stack[-1]])
 
         # 2. ANIM_end
         elif cmd_type == TOKEN_ANIM_END or isinstance(cmd, AnimEndCommand):
             if stack:
                 stack.pop()
+            if len(matrix_stack) > 1:
+                matrix_stack.pop()
 
         # 3. ANIM_rotate
         elif cmd_type == TOKEN_ANIM_ROTATE or isinstance(cmd, AnimRotateCommand):
@@ -193,7 +204,6 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
                 all_animated_nodes.append(target_node)
                 stack.append(target_node)
             elif target_node.motion_type in ("ROTATE", "TRANSLATE") and target_node.dataref:
-                # Compound animation in same block: chain child node
                 node_counter += 1
                 child_node = AnimNode(id=node_counter, parent=target_node)
                 target_node.children.append(child_node)
@@ -205,15 +215,22 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
             target_node.unit = "deg"
             target_node.dataref = getattr(cmd, 'dataref', cmd[8] if len(cmd) > 8 else "")
 
-            # Normalized rotation axis in Blender coordinate space
-            if hasattr(cmd, 'axis'):
-                ax, ay, az = cmd.axis
-            else:
-                ax, ay, az = float(cmd[1]), float(cmd[2]), float(cmd[3])
+            # Raw axis
+            raw_axis = getattr(cmd, 'raw_axis', None)
+            if raw_axis is None:
+                if len(cmd) > 3:
+                    raw_axis = (float(cmd[1]), float(cmd[2]), float(cmd[3]))
+                else:
+                    raw_axis = (0.0, 1.0, 0.0)
 
-            alen = math.sqrt(ax * ax + ay * ay + az * az)
-            norm_axis = (ax / alen, ay / alen, az / alen) if alen > 1e-5 else (0.0, 1.0, 0.0)
-            target_node.axis = norm_axis
+            # Compute bone head (pivot) and axis in world space via active matrix
+            head_xp = mat4_transform_point(matrix_stack[-1], (0.0, 0.0, 0.0))
+            target_node.pivot = xp_to_blender_point(head_xp[0], head_xp[1], head_xp[2])
+
+            axis_xp = mat4_transform_vector(matrix_stack[-1], raw_axis)
+            bl_axis = xp_to_blender_vector(axis_xp[0], axis_xp[1], axis_xp[2])
+            alen = math.sqrt(bl_axis[0]**2 + bl_axis[1]**2 + bl_axis[2]**2)
+            target_node.axis = (bl_axis[0] / alen, bl_axis[1] / alen, bl_axis[2] / alen) if alen > 1e-6 else (0.0, 1.0, 0.0)
 
             angle1 = getattr(cmd, 'angle1', float(cmd[4]))
             angle2 = getattr(cmd, 'angle2', float(cmd[5]))
@@ -225,6 +242,10 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
             target_node.input_max = max(val1, val2)
             target_node.output_min = min(angle1, angle2)
             target_node.output_max = max(angle1, angle2)
+
+            # Update matrix stack
+            R = mat4_rotate(angle1, raw_axis[0], raw_axis[1], raw_axis[2])
+            matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
 
         # 4. ANIM_rotate_begin / keys / end
         elif cmd_type == TOKEN_ANIM_ROTATE_BEGIN or isinstance(cmd, AnimRotateBeginCommand):
@@ -247,14 +268,23 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
             target_node.unit = "deg"
             target_node.dataref = getattr(cmd, 'dataref', cmd[4] if len(cmd) > 4 else "")
 
-            if hasattr(cmd, 'axis'):
-                ax, ay, az = cmd.axis
-            else:
-                ax, ay, az = float(cmd[1]), float(cmd[2]), float(cmd[3])
+            raw_axis = getattr(cmd, 'raw_axis', None)
+            if raw_axis is None:
+                raw_axis = (float(cmd[1]), float(cmd[2]), float(cmd[3])) if len(cmd) > 3 else (0.0, 1.0, 0.0)
 
-            alen = math.sqrt(ax * ax + ay * ay + az * az)
-            norm_axis = (ax / alen, ay / alen, az / alen) if alen > 1e-5 else (0.0, 1.0, 0.0)
-            target_node.axis = norm_axis
+            # Compute bone head (pivot) and axis in world space via active matrix
+            head_xp = mat4_transform_point(matrix_stack[-1], (0.0, 0.0, 0.0))
+            target_node.pivot = xp_to_blender_point(head_xp[0], head_xp[1], head_xp[2])
+
+            axis_xp = mat4_transform_vector(matrix_stack[-1], raw_axis)
+            bl_axis = xp_to_blender_vector(axis_xp[0], axis_xp[1], axis_xp[2])
+            alen = math.sqrt(bl_axis[0]**2 + bl_axis[1]**2 + bl_axis[2]**2)
+            target_node.axis = (bl_axis[0] / alen, bl_axis[1] / alen, bl_axis[2] / alen) if alen > 1e-6 else (0.0, 1.0, 0.0)
+
+            active_rotate_begin_mat = {
+                'raw_axis': raw_axis,
+                'target_node': target_node,
+            }
 
             if hasattr(cmd, 'keys') and cmd.keys:
                 target_node.keyframes = [(k[0], k[1]) for k in cmd.keys]
@@ -262,6 +292,26 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
                 target_node.input_max = max(k[0] for k in cmd.keys)
                 target_node.output_min = min(k[1] for k in cmd.keys)
                 target_node.output_max = max(k[1] for k in cmd.keys)
+
+        elif cmd_type == TOKEN_ANIM_ROTATE_KEY or isinstance(cmd, AnimRotateKeyCommand):
+            val = getattr(cmd, 'val', float(cmd[1]))
+            angle = getattr(cmd, 'angle', float(cmd[2]))
+            if active_rotate_begin_mat and active_rotate_begin_mat['target_node']:
+                tn = active_rotate_begin_mat['target_node']
+                tn.keyframes.append((val, angle))
+                tn.input_min = min(tn.input_min, val) if tn.input_min != 0.0 or len(tn.keyframes) > 1 else val
+                tn.input_max = max(tn.input_max, val) if tn.input_max != 0.0 or len(tn.keyframes) > 1 else val
+                tn.output_min = min(tn.output_min, angle) if tn.output_min != 0.0 or len(tn.keyframes) > 1 else angle
+                tn.output_max = max(tn.output_max, angle) if tn.output_max != 0.0 or len(tn.keyframes) > 1 else angle
+
+        elif cmd_type == TOKEN_ANIM_ROTATE_END or isinstance(cmd, AnimRotateEndCommand):
+            if active_rotate_begin_mat:
+                tn = active_rotate_begin_mat['target_node']
+                raw_axis = active_rotate_begin_mat['raw_axis']
+                rest_ang = min(tn.keyframes, key=lambda k: abs(k[0]))[1] if tn.keyframes else 0.0
+                R = mat4_rotate(rest_ang, raw_axis[0], raw_axis[1], raw_axis[2])
+                matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
+                active_rotate_begin_mat = None
 
         # 5. ANIM_trans
         elif cmd_type == TOKEN_ANIM_TRANS or isinstance(cmd, AnimTransCommand):
@@ -284,28 +334,37 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
             target_node.unit = "m"
             target_node.dataref = getattr(cmd, 'dataref', cmd[9] if len(cmd) > 9 else "")
 
-            p1 = getattr(cmd, 'p1', (float(cmd[1]), float(cmd[2]), float(cmd[3])))
-            p2 = getattr(cmd, 'p2', (float(cmd[4]), float(cmd[5]), float(cmd[6])))
+            raw_p1 = getattr(cmd, 'raw_p1', None)
+            raw_p2 = getattr(cmd, 'raw_p2', None)
+            if raw_p1 is None:
+                raw_p1 = (float(cmd[1]), float(cmd[2]), float(cmd[3]))
+                raw_p2 = (float(cmd[4]), float(cmd[5]), float(cmd[6]))
+
+            head_xp = mat4_transform_point(matrix_stack[-1], (0.0, 0.0, 0.0))
+            target_node.pivot = xp_to_blender_point(head_xp[0], head_xp[1], head_xp[2])
+
+            dx = raw_p2[0] - raw_p1[0]
+            dy = raw_p2[1] - raw_p1[1]
+            dz = raw_p2[2] - raw_p1[2]
+            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+            raw_axis = (dx / dist, dy / dist, dz / dist) if dist > 1e-5 else (0.0, 1.0, 0.0)
+
+            axis_xp = mat4_transform_vector(matrix_stack[-1], raw_axis)
+            bl_axis = xp_to_blender_vector(axis_xp[0], axis_xp[1], axis_xp[2])
+            alen = math.sqrt(bl_axis[0]**2 + bl_axis[1]**2 + bl_axis[2]**2)
+            target_node.axis = (bl_axis[0] / alen, bl_axis[1] / alen, bl_axis[2] / alen) if alen > 1e-6 else (0.0, 1.0, 0.0)
+
             val1 = getattr(cmd, 'val1', float(cmd[7]))
             val2 = getattr(cmd, 'val2', float(cmd[8]))
-
-            dx = p2[0] - p1[0]
-            dy = p2[1] - p1[1]
-            dz = p2[2] - p1[2]
-            dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-
-            if dist > 1e-5:
-                norm_axis = (dx / dist, dy / dist, dz / dist)
-            else:
-                norm_axis = (0.0, 1.0, 0.0)
-
-            target_node.axis = norm_axis
-            target_node.pivot = p1
             target_node.keyframes = [(val1, 0.0), (val2, dist)]
             target_node.input_min = min(val1, val2)
             target_node.input_max = max(val1, val2)
             target_node.output_min = 0.0
             target_node.output_max = dist
+
+            # Update matrix stack
+            T = mat4_translate(raw_p1[0], raw_p1[1], raw_p1[2])
+            matrix_stack[-1] = mat4_mul(matrix_stack[-1], T)
 
         # 6. ANIM_trans_begin / keys / end
         elif cmd_type == TOKEN_ANIM_TRANS_BEGIN or isinstance(cmd, AnimTransBeginCommand):
@@ -328,25 +387,14 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
             target_node.unit = "m"
             target_node.dataref = getattr(cmd, 'dataref', cmd[1] if len(cmd) > 1 else "")
 
-            if hasattr(cmd, 'keys') and cmd.keys:
-                p0 = (cmd.keys[0][1], cmd.keys[0][2], cmd.keys[0][3])
-                p_last = (cmd.keys[-1][1], cmd.keys[-1][2], cmd.keys[-1][3])
-                dx = p_last[0] - p0[0]
-                dy = p_last[1] - p0[1]
-                dz = p_last[2] - p0[2]
-                dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-                norm_axis = (dx / dist, dy / dist, dz / dist) if dist > 1e-5 else (0.0, 1.0, 0.0)
+            head_xp = mat4_transform_point(matrix_stack[-1], (0.0, 0.0, 0.0))
+            target_node.pivot = xp_to_blender_point(head_xp[0], head_xp[1], head_xp[2])
 
-                target_node.axis = norm_axis
-                target_node.pivot = p0
-                target_node.keyframes = [
-                    (k[0], math.sqrt((k[1] - p0[0]) ** 2 + (k[2] - p0[1]) ** 2 + (k[3] - p0[2]) ** 2))
-                    for k in cmd.keys
-                ]
-                target_node.input_min = min(k[0] for k in target_node.keyframes)
-                target_node.input_max = max(k[0] for k in target_node.keyframes)
-                target_node.output_min = min(k[1] for k in target_node.keyframes)
-                target_node.output_max = max(k[1] for k in target_node.keyframes)
+        elif cmd_type == TOKEN_ANIM_TRANS_KEY or isinstance(cmd, AnimTransKeyCommand):
+            pass
+
+        elif cmd_type == TOKEN_ANIM_TRANS_END or isinstance(cmd, AnimTransEndCommand):
+            pass
 
         # 7. ANIM_hide / show / loop
         elif cmd_type == TOKEN_ANIM_HIDE or isinstance(cmd, AnimHideCommand):
@@ -395,21 +443,18 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
         node.name = node.bone_name
 
         # Calculate pivot / head
-        if node.motion_type == "TRANSLATE":
+        if node.pivot != (0.0, 0.0, 0.0):
             head = node.pivot
+        elif node.vertex_positions:
+            cx = sum(p[0] for p in node.vertex_positions) / len(node.vertex_positions)
+            cy = sum(p[1] for p in node.vertex_positions) / len(node.vertex_positions)
+            cz = sum(p[2] for p in node.vertex_positions) / len(node.vertex_positions)
+            head = (cx, cy, cz)
+        elif node.parent and node.parent.pivot != (0.0, 0.0, 0.0):
+            head = node.parent.pivot
         else:
-            # ROTATE
-            if node.vertex_positions:
-                # Compute centroid of vertices for this animated part
-                cx = sum(p[0] for p in node.vertex_positions) / len(node.vertex_positions)
-                cy = sum(p[1] for p in node.vertex_positions) / len(node.vertex_positions)
-                cz = sum(p[2] for p in node.vertex_positions) / len(node.vertex_positions)
-                head = (cx, cy, cz)
-            elif node.parent and node.parent.pivot != (0.0, 0.0, 0.0):
-                head = node.parent.pivot
-            else:
-                head = (0.0, 0.0, 0.0)
-            node.pivot = head
+            head = (0.0, 0.0, 0.0)
+        node.pivot = head
 
         # Calculate tail enforcing Blender 4.3 minimum 0.2m non-zero length
         axis = node.axis
@@ -417,11 +462,13 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
         if alen < 1e-5:
             axis = (0.0, 1.0, 0.0)
             node.axis = axis
+        else:
+            node.axis = (axis[0] / alen, axis[1] / alen, axis[2] / alen)
 
-        tail = (head[0] + axis[0] * 0.2, head[1] + axis[1] * 0.2, head[2] + axis[2] * 0.2)
+        tail = (head[0] + node.axis[0] * 0.2, head[1] + node.axis[1] * 0.2, head[2] + node.axis[2] * 0.2)
         dx, dy, dz = tail[0] - head[0], tail[1] - head[1], tail[2] - head[2]
         cur_len = math.sqrt(dx * dx + dy * dy + dz * dz)
-        if cur_len < 0.19:
+        if cur_len < 0.15:
             tail = (head[0], head[1] + 0.2, head[2])
         node.tail = tail
 
@@ -557,6 +604,7 @@ def build_armature(
                 continue
 
             num_verts = len(mesh_obj.data.vertices)
+            assigned_indices: Set[int] = set()
             for node in all_nodes_with_root:
                 if node.vertex_indices:
                     valid_indices = [idx for idx in node.vertex_indices if idx < num_verts]
@@ -565,6 +613,17 @@ def build_armature(
                         if vg is None:
                             vg = mesh_obj.vertex_groups.new(name=node.bone_name)
                         vg.add(valid_indices, 1.0, 'REPLACE')
+                        if node != root_node:
+                            assigned_indices.update(valid_indices)
+
+            # Assign any unassigned vertices to root bone
+            all_indices = set(range(num_verts))
+            unassigned = all_indices - assigned_indices
+            if unassigned:
+                vg_root = mesh_obj.vertex_groups.get(root_node.bone_name)
+                if vg_root is None:
+                    vg_root = mesh_obj.vertex_groups.new(name=root_node.bone_name)
+                vg_root.add(list(unassigned), 1.0, 'REPLACE')
 
             # Add Armature modifier
             arm_mod = None
@@ -580,3 +639,176 @@ def build_armature(
             mesh_obj.parent = arm_obj
 
     return arm_obj
+
+
+def build_unified_armature(
+    items: List[Tuple[ParsedOBJ8, Any]],
+    context: Optional[Any] = None,
+    armature_name: Optional[str] = "Aircraft_Armature",
+) -> Optional[Any]:
+    """
+    Constructs a single, unified Blender Armature representing the full hierarchical kinematic chain
+    across all imported parts/components of an aircraft.
+
+    - Creates a single Armature object with a 'root' bone at (0, 0, 0).
+    - Iterates over all (parsed_data, mesh_obj) pairs, parsing animation hierarchies and instantiating
+      EditBones for all animated control surfaces (landing gears, flaps, ailerons, elevators, rudder, canopies, etc.).
+    - Preserves all DataRef and animation metadata on Bones and PoseBones.
+    - Binds each mesh object to the single Armature with vertex groups (weight 1.0 for moving components,
+      and weight 1.0 to 'root' for static airframe parts).
+    - Sets child_bone.parent hierarchically, falling back to 'root' for top-level component bones.
+
+    :param items: List of (parsed_data, mesh_obj) tuples
+    :param context: Blender bpy.context
+    :param armature_name: Custom name for the unified Armature
+    :return: Created bpy.types.Object Armature, or None if no items
+    """
+    if bpy is None:
+        raise RuntimeError("Blender 'bpy' module is required to build Armatures.")
+
+    if not items:
+        return None
+
+    arm_name = armature_name or "Aircraft_Armature"
+    arm_data = bpy.data.armatures.new(name=f"{arm_name}_Data")
+    arm_obj = bpy.data.objects.new(arm_name, arm_data)
+
+    # 1. Link Armature to target collection
+    target_collection = None
+    if context and hasattr(context, "collection") and context.collection:
+        target_collection = context.collection
+    elif bpy.context and hasattr(bpy.context, "scene") and bpy.context.scene:
+        target_collection = bpy.context.scene.collection
+
+    if target_collection is not None and arm_obj.name not in target_collection.objects:
+        target_collection.objects.link(arm_obj)
+
+    # 2. Enter EDIT mode to create all bones in a single session
+    if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
+    bpy.context.view_layer.objects.active = arm_obj
+    bpy.ops.object.mode_set(mode='EDIT')
+
+    edit_bones = arm_data.edit_bones
+
+    # 3. Create single unified root bone
+    root_eb = edit_bones.new("root")
+    root_eb.head = Vector((0.0, 0.0, 0.0))
+    root_eb.tail = Vector((0.0, 1.0, 0.0))
+    root_eb.use_connect = False
+    root_eb["xp_dataref"] = ""
+    root_eb["xp_motion_type"] = "NONE"
+    root_eb["xp_axis"] = [0.0, 1.0, 0.0]
+
+    created_ebs: Dict[str, Any] = {"root": root_eb}
+    skinning_plan: List[Tuple[Any, List[AnimNode]]] = []
+
+    # 4. Parse and generate EditBones for each part
+    for parsed_data, mesh_obj in items:
+        if not mesh_obj or mesh_obj.type != 'MESH':
+            continue
+
+        if not has_animation_commands(parsed_data):
+            skinning_plan.append((mesh_obj, []))
+            continue
+
+        part_root, anim_nodes = parse_animation_hierarchy(parsed_data)
+        part_name = mesh_obj.name
+
+        node_map: Dict[int, Any] = {}
+        for node in anim_nodes:
+            base_bone = node.bone_name
+            cand = f"{part_name}_{base_bone}"
+            counter = 1
+            while cand in created_ebs:
+                cand = f"{part_name}_{base_bone}.{counter:03d}"
+                counter += 1
+            node.bone_name = cand
+
+            eb = edit_bones.new(cand)
+            eb.head = Vector(node.pivot)
+            eb.tail = Vector(node.tail)
+            eb.use_connect = False
+
+            # Parenting
+            if node.parent and node.parent != part_root and node.parent.id in node_map:
+                eb.parent = node_map[node.parent.id]
+            else:
+                eb.parent = root_eb
+
+            # Custom properties (Feature 11)
+            eb["xp_dataref"] = str(node.dataref)
+            eb["xp_motion_type"] = str(node.motion_type)
+            eb["xp_axis"] = [float(node.axis[0]), float(node.axis[1]), float(node.axis[2])]
+            eb["xp_keyframes"] = [[float(k[0]), float(k[1])] for k in node.keyframes]
+            eb["xp_input_min"] = float(node.input_min)
+            eb["xp_input_max"] = float(node.input_max)
+            eb["xp_output_min"] = float(node.output_min)
+            eb["xp_output_max"] = float(node.output_max)
+            eb["xp_unit"] = str(node.unit)
+
+            if node.hide_range:
+                eb["xp_hide_min"] = float(node.hide_range[0])
+                eb["xp_hide_max"] = float(node.hide_range[1])
+                eb["xp_hide_dataref"] = str(node.hide_range[2])
+            if node.show_range:
+                eb["xp_show_min"] = float(node.show_range[0])
+                eb["xp_show_max"] = float(node.show_range[1])
+                eb["xp_show_dataref"] = str(node.show_range[2])
+            if node.loop_modulus is not None:
+                eb["xp_loop_modulus"] = float(node.loop_modulus)
+
+            created_ebs[cand] = eb
+            node_map[node.id] = eb
+
+        skinning_plan.append((mesh_obj, anim_nodes))
+
+    # 5. Exit EDIT mode
+    bpy.ops.object.mode_set(mode='OBJECT')
+
+    # 6. Propagate properties to PoseBones
+    for bone in arm_data.bones:
+        if bone.name in arm_obj.pose.bones:
+            pb = arm_obj.pose.bones[bone.name]
+            for k, v in bone.items():
+                if k.startswith("xp_"):
+                    pb[k] = v
+
+    # 7. Skin all mesh objects
+    for mesh_obj, anim_nodes in skinning_plan:
+        mesh_obj.parent = arm_obj
+
+        arm_mod = None
+        for mod in mesh_obj.modifiers:
+            if mod.type == 'ARMATURE':
+                arm_mod = mod
+                break
+        if arm_mod is None:
+            arm_mod = mesh_obj.modifiers.new(name="Armature", type='ARMATURE')
+        arm_mod.object = arm_obj
+
+        num_verts = len(mesh_obj.data.vertices)
+        assigned_indices: Set[int] = set()
+
+        for node in anim_nodes:
+            if node.vertex_indices:
+                valid = [i for i in node.vertex_indices if i < num_verts]
+                if valid:
+                    vg = mesh_obj.vertex_groups.get(node.bone_name)
+                    if vg is None:
+                        vg = mesh_obj.vertex_groups.new(name=node.bone_name)
+                    vg.add(valid, 1.0, 'REPLACE')
+                    assigned_indices.update(valid)
+
+        # Unassigned vertices get root weighting 1.0
+        all_indices = set(range(num_verts))
+        unassigned = all_indices - assigned_indices
+        if unassigned:
+            vg_root = mesh_obj.vertex_groups.get("root")
+            if vg_root is None:
+                vg_root = mesh_obj.vertex_groups.new(name="root")
+            vg_root.add(list(unassigned), 1.0, 'REPLACE')
+
+    return arm_obj
+

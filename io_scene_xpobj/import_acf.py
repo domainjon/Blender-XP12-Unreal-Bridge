@@ -26,6 +26,7 @@ from .constants import (
     COCKPIT_KEYWORDS,
 )
 from .import_obj8 import import_obj8_file, parse_obj8, build_mesh
+from .anim_rigging import build_unified_armature
 
 
 @dataclass
@@ -139,8 +140,45 @@ def parse_acf(filepath: str) -> ParsedACF:
                 except ValueError:
                     pass
 
-            # Attached object path
-            elif prop_key.startswith('acf/_misc_obj_name/') or prop_key.startswith('acf/_obj_path/'):
+            # Modern X-Plane 11/12 attached objects: _obja/<idx>/<field>
+            elif prop_key.startswith('_obja/') or prop_key.startswith('acf/_obja/'):
+                parts = prop_key.split('/')
+                idx_part = parts[1] if parts[0] == '_obja' else (parts[2] if len(parts) > 2 else "")
+                field_part = parts[2] if parts[0] == '_obja' and len(parts) > 2 else (parts[3] if len(parts) > 3 else "")
+                if idx_part.isdigit() and field_part:
+                    try:
+                        o_idx = int(idx_part)
+                        if field_part in ('_v10_att_file_stl', '_att_file_stl', '_att_file'):
+                            clean_val = prop_val.strip('"\'').replace('\\', '/')
+                            obj_paths[o_idx] = clean_val
+                        elif field_part == '_v10_att_x_acf_prt_ref':
+                            if o_idx not in obj_xyz:
+                                obj_xyz[o_idx] = [0.0, 0.0, 0.0]
+                            obj_xyz[o_idx][0] = float(prop_val)
+                        elif field_part == '_v10_att_y_acf_prt_ref':
+                            if o_idx not in obj_xyz:
+                                obj_xyz[o_idx] = [0.0, 0.0, 0.0]
+                            obj_xyz[o_idx][1] = float(prop_val)
+                        elif field_part == '_v10_att_z_acf_prt_ref':
+                            if o_idx not in obj_xyz:
+                                obj_xyz[o_idx] = [0.0, 0.0, 0.0]
+                            obj_xyz[o_idx][2] = float(prop_val)
+                        elif field_part == '_v10_is_internal':
+                            try:
+                                v = int(prop_val)
+                                obj_is_cockpit[o_idx] = (v in (1, 2))
+                            except ValueError:
+                                pass
+                        elif field_part in ('_v10_lighting', '_obj_lighting'):
+                            try:
+                                obj_lighting[o_idx] = int(prop_val)
+                            except ValueError:
+                                pass
+                    except (ValueError, IndexError):
+                        pass
+
+            # Legacy X-Plane attached object path
+            elif prop_key.startswith('acf/_misc_obj_name/') or prop_key.startswith('acf/_obj_path/') or prop_key.startswith('_misc_obj_name/'):
                 idx_part = prop_key.split('/')[-1]
                 try:
                     o_idx = int(idx_part)
@@ -200,11 +238,17 @@ def parse_acf(filepath: str) -> ParsedACF:
     for idx in all_indices:
         rel_path = obj_paths.get(idx, f"objects/part_{idx}.obj")
         norm_rel = rel_path.lstrip('/\\')
+
+        # Only process 3D mesh .obj files (skip .wpn, .afl, etc.)
+        if not norm_rel.lower().endswith(".obj"):
+            continue
+
         referenced_rel_paths.add(os.path.normpath(norm_rel).lower())
 
-        # Resolve candidate paths
+        # Resolve candidate paths across nested objects/ subdirectories
         abs_candidates = [
             os.path.normpath(os.path.join(base_dir, norm_rel)),
+            os.path.normpath(os.path.join(base_dir, "objects", norm_rel)),
             os.path.normpath(os.path.join(base_dir, "objects", os.path.basename(norm_rel))),
             os.path.normpath(os.path.join(base_dir, os.path.basename(norm_rel))),
         ]
@@ -217,16 +261,27 @@ def parse_acf(filepath: str) -> ParsedACF:
                 file_exists = True
                 break
 
+        # If not yet found, search recursively inside objects/ directory
+        if not file_exists:
+            base_fname = os.path.basename(norm_rel).lower()
+            objects_dir = os.path.join(base_dir, "objects")
+            if os.path.isdir(objects_dir):
+                for r_dir, _, f_names in os.walk(objects_dir):
+                    for fn in f_names:
+                        if fn.lower() == base_fname:
+                            resolved_abs = os.path.join(r_dir, fn)
+                            file_exists = True
+                            break
+                    if file_exists:
+                        break
+
         coords = obj_xyz.get(idx, [0.0, 0.0, 0.0])
         xp_offset = (coords[0], coords[1], coords[2])
         bl_offset = xp_to_blender_point(coords[0], coords[1], coords[2])
 
-        # Determine cockpit status: prioritize explicit flag over filename heuristics
-        if idx in obj_is_cockpit:
-            is_cockpit = obj_is_cockpit[idx]
-        else:
-            lower_name = os.path.basename(rel_path).lower()
-            is_cockpit = any(kw in lower_name for kw in COCKPIT_KEYWORDS)
+        # Determine cockpit status: check path keywords and explicit flag
+        lower_rel = norm_rel.lower()
+        is_cockpit = any(kw in lower_rel for kw in COCKPIT_KEYWORDS) or obj_is_cockpit.get(idx, False)
 
         lighting = obj_lighting.get(idx, 0)
 
@@ -267,13 +322,14 @@ def import_acf_project(
     - Imports all attached .obj models from objects/ with relative coordinate transforms.
     - Filters components according to component_filter ('BOTH', 'EXTERIOR', 'COCKPIT').
     - Applies relative coordinate offsets: X_bl = X_xp, Y_bl = -Z_xp, Z_bl = Y_xp.
+    - Assembles all imported components under a single unified Armature.
     - Tags custom properties on imported objects.
 
     :param acf_filepath: Path to the .acf file
     :param context: Blender bpy.context
     :param component_filter: 'BOTH', 'EXTERIOR', or 'COCKPIT'
     :param lod_level: Specific LOD level to import (default 0)
-    :return: Dict containing 'parsed_acf', 'root_collection', 'imported_objects'
+    :return: Dict containing 'parsed_acf', 'root_collection', 'imported_objects', 'armature_obj'
     """
     if bpy is None:
         raise RuntimeError("Blender 'bpy' module is required to import ACF projects.")
@@ -296,6 +352,7 @@ def import_acf_project(
 
     imported_objects: List[Any] = []
     skipped_objects: List[str] = []
+    items_to_rig: List[Tuple[Any, Any]] = []
 
     # Import each attached object
     for entry in parsed_acf.attached_objects:
@@ -316,10 +373,11 @@ def import_acf_project(
         try:
             # Parse OBJ8 and build mesh
             parsed_obj = parse_obj8(entry.abs_path)
+            part_name = os.path.splitext(os.path.basename(entry.abs_path))[0]
             part_obj = build_mesh(
                 parsed_data=parsed_obj,
                 context=context,
-                name=f"{parsed_obj.name}_{entry.index}",
+                name=f"{part_name}_{entry.index}",
                 lod_level=lod_level
             )
 
@@ -342,10 +400,30 @@ def import_acf_project(
                     col.objects.unlink(part_obj)
 
             imported_objects.append(part_obj)
+            items_to_rig.append((parsed_obj, part_obj))
 
         except Exception as e:
             print(f"[io_scene_xpobj] Warning: Failed importing attached part '{entry.rel_path}': {e}")
             skipped_objects.append(entry.rel_path)
+
+    # Build a unified Armature for the entire aircraft
+    armature_obj = None
+    if items_to_rig:
+        try:
+            arm_name = f"{sanitized_name}_Armature"
+            armature_obj = build_unified_armature(
+                items=items_to_rig,
+                context=context,
+                armature_name=arm_name
+            )
+            if armature_obj is not None:
+                if armature_obj.name not in root_col.objects:
+                    root_col.objects.link(armature_obj)
+                for col in list(armature_obj.users_collection):
+                    if col != root_col:
+                        col.objects.unlink(armature_obj)
+        except Exception as e:
+            print(f"[io_scene_xpobj] Warning: Failed building unified armature: {e}")
 
     return {
         'parsed_acf': parsed_acf,
@@ -354,4 +432,6 @@ def import_acf_project(
         'cockpit_collection': cockpit_col,
         'imported_objects': imported_objects,
         'skipped_objects': skipped_objects,
+        'armature_obj': armature_obj,
     }
+

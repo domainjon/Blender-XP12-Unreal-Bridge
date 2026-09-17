@@ -60,6 +60,72 @@ from .materials import create_xplane_pbr_material
 
 
 # ==============================================================================
+# Matrix 4x4 Math Helpers (OpenGL / OBJ8 Transformation Stack)
+# ==============================================================================
+
+def mat4_identity() -> List[List[float]]:
+    return [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def mat4_mul(a: List[List[float]], b: List[List[float]]) -> List[List[float]]:
+    c = [[0.0] * 4 for _ in range(4)]
+    for i in range(4):
+        for j in range(4):
+            c[i][j] = a[i][0] * b[0][j] + a[i][1] * b[1][j] + a[i][2] * b[2][j] + a[i][3] * b[3][j]
+    return c
+
+
+def mat4_translate(tx: float, ty: float, tz: float) -> List[List[float]]:
+    m = mat4_identity()
+    m[0][3] = float(tx)
+    m[1][3] = float(ty)
+    m[2][3] = float(tz)
+    return m
+
+
+def mat4_rotate(angle_deg: float, ax: float, ay: float, az: float) -> List[List[float]]:
+    rad = math.radians(float(angle_deg))
+    c = math.cos(rad)
+    s = math.sin(rad)
+    l = math.sqrt(ax * ax + ay * ay + az * az)
+    if l < 1e-9:
+        return mat4_identity()
+    x, y, z = ax / l, ay / l, az / l
+    omc = 1.0 - c
+    return [
+        [x * x * omc + c,     x * y * omc - z * s, x * z * omc + y * s, 0.0],
+        [y * x * omc + z * s, y * y * omc + c,     y * z * omc - x * s, 0.0],
+        [z * x * omc - y * s, z * y * omc + x * s, z * z * omc + c,     0.0],
+        [0.0,                 0.0,                 0.0,                 1.0],
+    ]
+
+
+def mat4_transform_point(m: List[List[float]], p: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    x, y, z = p[0], p[1], p[2]
+    return (
+        m[0][0] * x + m[0][1] * y + m[0][2] * z + m[0][3],
+        m[1][0] * x + m[1][1] * y + m[1][2] * z + m[1][3],
+        m[2][0] * x + m[2][1] * y + m[2][2] * z + m[2][3],
+    )
+
+
+def mat4_transform_vector(m: List[List[float]], v: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    vx, vy, vz = v[0], v[1], v[2]
+    rx = m[0][0] * vx + m[0][1] * vy + m[0][2] * vz
+    ry = m[1][0] * vx + m[1][1] * vy + m[1][2] * vz
+    rz = m[2][0] * vx + m[2][1] * vy + m[2][2] * vz
+    l = math.sqrt(rx * rx + ry * ry + rz * rz)
+    if l > 1e-6:
+        return (rx / l, ry / l, rz / l)
+    return (0.0, 1.0, 0.0)
+
+
+# ==============================================================================
 # Command Classes Supporting Both Tuple Unpacking and Attribute Access
 # ==============================================================================
 
@@ -84,12 +150,20 @@ class BaseCommand:
 
 class TrisCommand(BaseCommand):
     """Represents a TRIS draw command with counter-clockwise faces."""
-    def __init__(self, offset: int, count: int, faces: List[Tuple[int, int, int]], lod_index: int = 0):
+    def __init__(
+        self,
+        offset: int,
+        count: int,
+        faces: List[Tuple[int, int, int]],
+        lod_index: int = 0,
+        matrix: Optional[List[List[float]]] = None
+    ):
         super().__init__("TRIS", (offset, count, faces, lod_index))
         self.offset = offset
         self.count = count
         self.faces = faces
         self.lod_index = lod_index
+        self.matrix = matrix
 
 
 class AnimBeginCommand(BaseCommand):
@@ -310,6 +384,7 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
     parsed.materials['default'] = default_mat
 
     current_lod_index = 0
+    matrix_stack: List[List[List[float]]] = [mat4_identity()]
     active_rotate_begin: Optional[AnimRotateBeginCommand] = None
     active_trans_begin: Optional[AnimTransBeginCommand] = None
 
@@ -450,7 +525,13 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
                             v2 = idx_slice[i + 2]
                             faces_ccw.append(reverse_winding_triangle(v0, v1, v2))
 
-                    cmd = TrisCommand(offset, count, faces_ccw, lod_index=current_lod_index)
+                    cmd = TrisCommand(
+                        offset=offset,
+                        count=count,
+                        faces=faces_ccw,
+                        lod_index=current_lod_index,
+                        matrix=[row[:] for row in matrix_stack[-1]]
+                    )
                     parsed.commands.append(cmd)
                 except ValueError:
                     continue
@@ -469,21 +550,26 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
                     continue
 
         # ----------------------------------------------------------------------
-        # Animation Commands
+        # Animation Commands (with 3D transformation matrix stack)
         # ----------------------------------------------------------------------
         elif token == TOKEN_ANIM_BEGIN:
+            matrix_stack.append([row[:] for row in matrix_stack[-1]])
             parsed.commands.append(AnimBeginCommand())
 
         elif token == TOKEN_ANIM_END:
+            if len(matrix_stack) > 1:
+                matrix_stack.pop()
             parsed.commands.append(AnimEndCommand())
 
         elif token == TOKEN_ANIM_ROTATE:
-            # ANIM_rotate <ax> <ay> <az> <angle1> <angle2> <val1> <val2> [dataref]
-            if len(tokens) >= 8:
+            # ANIM_rotate <ax> <ay> <az> <angle1> <angle2> [val1 val2 dataref]
+            if len(tokens) >= 6:
                 try:
                     ax_xp, ay_xp, az_xp = float(tokens[1]), float(tokens[2]), float(tokens[3])
-                    angle1, angle2 = float(tokens[4]), float(tokens[5])
-                    val1, val2 = float(tokens[6]), float(tokens[7])
+                    angle1 = float(tokens[4])
+                    angle2 = float(tokens[5]) if len(tokens) > 5 else angle1
+                    val1 = float(tokens[6]) if len(tokens) > 6 else 0.0
+                    val2 = float(tokens[7]) if len(tokens) > 7 else 0.0
                     dataref = tokens[8] if len(tokens) > 8 else ""
 
                     # Transform rotation axis to Blender space
@@ -502,15 +588,19 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
                         raw_axis=(ax_xp, ay_xp, az_xp)
                     )
                     parsed.commands.append(cmd)
+
+                    # Apply rest rotation to active matrix stack
+                    R = mat4_rotate(angle1, ax_xp, ay_xp, az_xp)
+                    matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
                 except ValueError:
                     continue
 
         elif token == TOKEN_ANIM_ROTATE_BEGIN:
-            # ANIM_rotate_begin <ax> <ay> <az> <dataref>
-            if len(tokens) >= 5:
+            # ANIM_rotate_begin <ax> <ay> <az> [dataref]
+            if len(tokens) >= 4:
                 try:
                     ax_xp, ay_xp, az_xp = float(tokens[1]), float(tokens[2]), float(tokens[3])
-                    dataref = tokens[4]
+                    dataref = tokens[4] if len(tokens) > 4 else ""
                     bl_axis = xp_to_blender_vector(ax_xp, ay_xp, az_xp)
                     alen = math.sqrt(bl_axis[0]**2 + bl_axis[1]**2 + bl_axis[2]**2)
                     norm_axis = (bl_axis[0]/alen, bl_axis[1]/alen, bl_axis[2]/alen) if alen > 1e-6 else (0.0, 1.0, 0.0)
@@ -534,16 +624,24 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
                     continue
 
         elif token == TOKEN_ANIM_ROTATE_END:
+            if active_rotate_begin and active_rotate_begin.keys:
+                rest_ang = min(active_rotate_begin.keys, key=lambda k: abs(k[0]))[1]
+                raw_ax, raw_ay, raw_az = active_rotate_begin.raw_axis
+                R = mat4_rotate(rest_ang, raw_ax, raw_ay, raw_az)
+                matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
             active_rotate_begin = None
             parsed.commands.append(AnimRotateEndCommand())
 
         elif token == TOKEN_ANIM_TRANS:
-            # ANIM_trans <x1> <y1> <z1> <x2> <y2> <z2> <val1> <val2> [dataref]
-            if len(tokens) >= 9:
+            # ANIM_trans <x1> <y1> <z1> <x2> <y2> <z2> [val1 val2 dataref]
+            if len(tokens) >= 7:
                 try:
                     x1, y1, z1 = float(tokens[1]), float(tokens[2]), float(tokens[3])
-                    x2, y2, z2 = float(tokens[4]), float(tokens[5]), float(tokens[6])
-                    val1, val2 = float(tokens[7]), float(tokens[8])
+                    x2 = float(tokens[4]) if len(tokens) > 4 else x1
+                    y2 = float(tokens[5]) if len(tokens) > 5 else y1
+                    z2 = float(tokens[6]) if len(tokens) > 6 else z1
+                    val1 = float(tokens[7]) if len(tokens) > 7 else 0.0
+                    val2 = float(tokens[8]) if len(tokens) > 8 else 0.0
                     dataref = tokens[9] if len(tokens) > 9 else ""
 
                     p1_bl = xp_to_blender_point(x1, y1, z1)
@@ -556,16 +654,19 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
                         raw_p1=(x1, y1, z1), raw_p2=(x2, y2, z2)
                     )
                     parsed.commands.append(cmd)
+
+                    # Apply rest translation to active matrix stack
+                    T = mat4_translate(x1, y1, z1)
+                    matrix_stack[-1] = mat4_mul(matrix_stack[-1], T)
                 except ValueError:
                     continue
 
         elif token == TOKEN_ANIM_TRANS_BEGIN:
-            # ANIM_trans_begin <dataref>
-            if len(tokens) >= 2:
-                dataref = tokens[1]
-                cmd = AnimTransBeginCommand(dataref)
-                active_trans_begin = cmd
-                parsed.commands.append(cmd)
+            # ANIM_trans_begin [dataref]
+            dataref = tokens[1] if len(tokens) > 1 else ""
+            cmd = AnimTransBeginCommand(dataref)
+            active_trans_begin = cmd
+            parsed.commands.append(cmd)
 
         elif token == TOKEN_ANIM_TRANS_KEY:
             # ANIM_trans_key <val> <x> <y> <z>
@@ -583,6 +684,10 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
                     continue
 
         elif token == TOKEN_ANIM_TRANS_END:
+            if active_trans_begin and active_trans_begin.raw_keys:
+                rest_k = min(active_trans_begin.raw_keys, key=lambda k: abs(k[0]))
+                T = mat4_translate(rest_k[1], rest_k[2], rest_k[3])
+                matrix_stack[-1] = mat4_mul(matrix_stack[-1], T)
             active_trans_begin = None
             parsed.commands.append(AnimTransEndCommand())
 
@@ -733,18 +838,44 @@ def build_mesh(
     for tris_cmd in target_tris:
         faces.extend(tris_cmd.faces)
 
-    # 2. Create mesh datablock and assign geometry
-    me = bpy.data.meshes.new(name=f"{mesh_name}_Mesh")
-    me.from_pydata(parsed_data.vertices, [], faces)
+    # 2. Transform geometry using matrix stack attached to each TRIS command
+    final_verts = list(parsed_data.vertices)
+    final_normals = list(parsed_data.normals)
 
-    # 3. Smooth polygon shading (Required before custom normals in Blender 4.1+)
+    has_matrix_transforms = False
+    for tris_cmd in target_tris:
+        m = getattr(tris_cmd, 'matrix', None)
+        if m is None:
+            continue
+        has_matrix_transforms = True
+        for f in tris_cmd.faces:
+            for v_idx in f:
+                if v_idx < len(parsed_data.raw_vertices):
+                    raw_pt = parsed_data.raw_vertices[v_idx]
+                    xp_pt = mat4_transform_point(m, raw_pt)
+                    final_verts[v_idx] = xp_to_blender_point(xp_pt[0], xp_pt[1], xp_pt[2])
+
+                    if v_idx < len(parsed_data.raw_normals):
+                        raw_norm = parsed_data.raw_normals[v_idx]
+                        xp_norm = mat4_transform_vector(m, raw_norm)
+                        final_normals[v_idx] = xp_to_blender_vector(xp_norm[0], xp_norm[1], xp_norm[2])
+
+    if has_matrix_transforms:
+        parsed_data.vertices = final_verts
+        parsed_data.normals = final_normals
+
+    # 3. Create mesh datablock and assign geometry
+    me = bpy.data.meshes.new(name=f"{mesh_name}_Mesh")
+    me.from_pydata(final_verts, [], faces)
+
+    # 4. Smooth polygon shading (Required before custom normals in Blender 4.1+)
     if len(me.polygons) > 0:
         me.polygons.foreach_set("use_smooth", [True] * len(me.polygons))
 
-    # 4. Geometry validation
+    # 5. Geometry validation
     me.validate(verbose=False, clean_customdata=False)
 
-    # 5. UV coordinates via foreach_set for maximum performance
+    # 6. UV coordinates via foreach_set for maximum performance
     if parsed_data.uvs and len(me.loops) > 0:
         uv_layer = me.uv_layers.new(name="UVMap")
         num_uvs = len(parsed_data.uvs)
@@ -758,9 +889,9 @@ def build_mesh(
                 flat_uvs.extend((0.0, 0.0))
         uv_layer.data.foreach_set("uv", flat_uvs)
 
-    # 6. Apply custom split vertex normals
-    if parsed_data.normals and len(parsed_data.normals) == len(me.vertices):
-        me.normals_split_custom_set_from_vertices(parsed_data.normals)
+    # 7. Apply custom split vertex normals
+    if final_normals and len(final_normals) == len(me.vertices):
+        me.normals_split_custom_set_from_vertices(final_normals)
 
     me.update()
 
