@@ -131,13 +131,17 @@ def has_animation_commands(parsed_data: ParsedOBJ8) -> bool:
     return False
 
 
-def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[AnimNode]]:
+def parse_animation_hierarchy(
+    parsed_data: ParsedOBJ8,
+    initial_matrix: Optional[List[List[float]]] = None,
+) -> Tuple[AnimNode, List[AnimNode]]:
     """
     Parses hierarchical OBJ8 animation blocks from parsed_data.commands.
     Maintains an animation stack pushing and popping nested states, capturing
     kinematic parent-child relationships and mapping geometry to bones.
 
     :param parsed_data: ParsedOBJ8 instance with populated commands
+    :param initial_matrix: Optional 4x4 transformation matrix
     :return: (root_node, all_animated_nodes)
     """
     root_node = AnimNode(
@@ -152,7 +156,8 @@ def parse_animation_hierarchy(parsed_data: ParsedOBJ8) -> Tuple[AnimNode, List[A
 
     all_animated_nodes: List[AnimNode] = []
     stack: List[AnimNode] = []
-    matrix_stack: List[List[List[float]]] = [mat4_identity()]
+    init_m = parsed_data.initial_matrix if (initial_matrix is None and parsed_data and parsed_data.initial_matrix) else initial_matrix
+    matrix_stack: List[List[List[float]]] = [[row[:] for row in init_m]] if init_m else [mat4_identity()]
     active_rotate_begin_mat: Optional[Dict[str, Any]] = None
     node_counter = 0
 

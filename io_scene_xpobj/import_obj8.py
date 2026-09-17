@@ -316,6 +316,7 @@ class ParsedOBJ8:
     raw_normals: List[Tuple[float, float, float]] = field(default_factory=list)
     point_counts: Tuple[int, int, int, int] = (0, 0, 0, 0)
     global_properties: Dict[str, Any] = field(default_factory=dict)
+    initial_matrix: Optional[List[List[float]]] = None
 
 
 from .anim_rigging import (
@@ -330,11 +331,12 @@ from .anim_rigging import (
 # Parser Implementation
 # ==============================================================================
 
-def parse_obj8(filepath: str) -> ParsedOBJ8:
+def parse_obj8(filepath: str, initial_matrix: Optional[List[List[float]]] = None) -> ParsedOBJ8:
     """
     Parses an X-Plane 12 OBJ8 file into a structured ParsedOBJ8 instance.
 
     :param filepath: Path to the .obj file
+    :param initial_matrix: Optional 4x4 transformation matrix to pre-seed the modelview stack
     :return: ParsedOBJ8 containing converted geometry, custom normals, UVs, and commands
     :raises ValueError: If the header is invalid or the file is malformed
     :raises FileNotFoundError: If the file does not exist
@@ -344,6 +346,7 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
 
     base_name = os.path.splitext(os.path.basename(filepath))[0]
     parsed = ParsedOBJ8(name=base_name, filepath=os.path.abspath(filepath))
+    parsed.initial_matrix = [row[:] for row in initial_matrix] if initial_matrix else None
 
     # Read file with utf-8, fallback to latin-1
     try:
@@ -384,7 +387,8 @@ def parse_obj8(filepath: str) -> ParsedOBJ8:
     parsed.materials['default'] = default_mat
 
     current_lod_index = 0
-    matrix_stack: List[List[List[float]]] = [mat4_identity()]
+    init_m = [row[:] for row in initial_matrix] if initial_matrix else mat4_identity()
+    matrix_stack: List[List[List[float]]] = [init_m]
     active_rotate_begin: Optional[AnimRotateBeginCommand] = None
     active_trans_begin: Optional[AnimTransBeginCommand] = None
 
@@ -843,6 +847,17 @@ def build_mesh(
     final_normals = list(parsed_data.normals)
 
     has_matrix_transforms = False
+    if parsed_data.initial_matrix:
+        has_matrix_transforms = True
+        m_init = parsed_data.initial_matrix
+        for i in range(len(final_verts)):
+            if i < len(parsed_data.raw_vertices):
+                xp_pt = mat4_transform_point(m_init, parsed_data.raw_vertices[i])
+                final_verts[i] = xp_to_blender_point(xp_pt[0], xp_pt[1], xp_pt[2])
+            if i < len(parsed_data.raw_normals):
+                xp_norm = mat4_transform_vector(m_init, parsed_data.raw_normals[i])
+                final_normals[i] = xp_to_blender_vector(xp_norm[0], xp_norm[1], xp_norm[2])
+
     for tris_cmd in target_tris:
         m = getattr(tris_cmd, 'matrix', None)
         if m is None:
@@ -906,11 +921,12 @@ def build_mesh(
             texture_path=mat_info.get('diffuse'),
             normal_texture_path=mat_info.get('normal'),
             lit_texture_path=mat_info.get('lit'),
-            use_procedural_normal_z=bool(mat_info.get('normal_metalness', True)),
+            use_procedural_normal_z=bool(mat_info.get('normal_metalness', False)),
             base_filepath=parsed_data.filepath,
         )
         if mat:
             obj.data.materials.append(mat)
+
 
     # 9. Link to collection if context is active
     target_collection = None

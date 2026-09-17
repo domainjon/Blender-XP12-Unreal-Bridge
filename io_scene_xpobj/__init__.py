@@ -10,16 +10,17 @@ Features:
 """
 
 bl_info = {
-    "name": "X-Plane 12 Aircraft & OBJ Importer / Exporter",
+    "name": "X-Plane 10/11/12 Aircraft & OBJ Bridge for Blender & Unreal",
     "author": "Community / FSWindowSeat",
-    "version": (2, 0, 0),
+    "version": (2, 1, 0),
     "blender": (4, 3, 0),
-    "location": "File > Import > X-Plane (.obj / .acf)",
-    "description": "Imports and exports X-Plane 12 .acf and .obj models with rigging, PBR materials, and Unreal Engine telemetry",
+    "location": "File > Import > X-Plane (.obj / .acf) | 3D Viewport > Sidebar > X-Plane Bridge",
+    "description": "Imports and exports X-Plane 10, 11, and 12 .acf and .obj models with rigging, PBR materials, and Unreal Engine telemetry",
     "category": "Import-Export",
-    "doc_url": "",
-    "tracker_url": "",
+    "doc_url": "https://github.com/domainjon/Blender-XP12-Unreal-Bridge",
+    "tracker_url": "https://github.com/domainjon/Blender-XP12-Unreal-Bridge/issues",
 }
+
 
 import os
 from typing import Optional, Any
@@ -215,8 +216,8 @@ if bpy is not None:
     class IMPORT_SCENE_OT_xplane_acf(bpy.types.Operator, ImportHelper):
         """Import a Plane Maker aircraft project (.acf) into Blender"""
         bl_idname = "import_scene.xplane_acf"
-        bl_label = "Import X-Plane Aircraft (.acf)"
-        bl_description = "Import an X-Plane 12 aircraft project (.acf) and assemble all attached objects"
+        bl_label = "Import X-Plane Aircraft (.acf) [XP10/11/12]"
+        bl_description = "Import an X-Plane 10, 11, or 12 aircraft project (.acf) and assemble all attached objects with Armature rigging"
         bl_options = {'REGISTER', 'UNDO'}
 
         filename_ext = ".acf"

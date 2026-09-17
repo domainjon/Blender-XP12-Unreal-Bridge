@@ -94,14 +94,35 @@ if bpy is not None:
     # ==============================================================================
 
     class VIEW3D_PT_xplane_bridge(bpy.types.Panel):
-        """Main sidebar panel for X-Plane 12 to Blender 4+ and Unreal Engine Bridge"""
+        """Main sidebar panel for X-Plane 10/11/12 to Blender 4+ and Unreal Engine Bridge"""
         bl_space_type = 'VIEW_3D'
         bl_region_type = 'UI'
-        bl_category = 'X-Plane 12'
-        bl_label = "X-Plane 12 Bridge"
+        bl_category = 'X-Plane Bridge'
+        bl_label = "X-Plane Bridge (XP10/11/12)"
 
         def draw(self, context):
             layout = self.layout
+
+            # ------------------------------------------------------------------
+            # Section: Aircraft Status in Scene
+            # ------------------------------------------------------------------
+            arms = [o for o in context.scene.objects if o.type == 'ARMATURE']
+            box_status = layout.box()
+            if arms:
+                arm = arms[0]
+                total_bones = len(arm.data.bones)
+                anim_bones = sum(1 for b in arm.data.bones if b.get('xp_dataref'))
+                associated_meshes = [
+                    o for o in context.scene.objects
+                    if o.type == 'MESH' and (o.parent == arm or any(m.type == 'ARMATURE' and m.object == arm for m in o.modifiers))
+                ]
+                box_status.label(text=f"Aircraft: {arm.name.replace('_Armature', '')}", icon='CHECKMARK')
+                col_stat = box_status.column(align=True)
+                col_stat.label(text=f"Bones: {total_bones} ({anim_bones} animated)")
+                col_stat.label(text=f"Meshes: {len(associated_meshes)} parts")
+            else:
+                box_status.label(text="No aircraft in scene", icon='INFO')
+                box_status.label(text="Import an .acf or .obj below")
 
             # ------------------------------------------------------------------
             # Section: Import
@@ -109,7 +130,7 @@ if bpy is not None:
             box_import = layout.box()
             box_import.label(text="Import Aircraft / Models", icon='IMPORT')
             col = box_import.column(align=True)
-            col.operator("import_scene.xplane_acf", text="Import Aircraft (.acf)", icon='COMMUNITY')
+            col.operator("import_scene.xplane_acf", text="Import Aircraft (.acf) [10/11/12]", icon='COMMUNITY')
             col.operator("import_scene.xplane_obj", text="Import OBJ8 (.obj)", icon='OBJECT_DATA')
 
             # ------------------------------------------------------------------
@@ -125,12 +146,14 @@ if bpy is not None:
             box_ue = layout.box()
             box_ue.label(text="Unreal Engine Pipeline", icon='EXPORT')
             box_ue.operator("export_scene.xplane_unreal", text="Export to UE (FBX + DataRef)", icon='ARMATURE_DATA')
+            if arms:
+                box_ue.label(text="1-Click export auto-detects aircraft", icon='INFO')
 
             # ------------------------------------------------------------------
-            # Section: X-Plane 12 Export
+            # Section: X-Plane Export
             # ------------------------------------------------------------------
             box_xp = layout.box()
-            box_xp.label(text="X-Plane 12 Export", icon='FILE_REFRESH')
+            box_xp.label(text="X-Plane OBJ8 Export", icon='FILE_REFRESH')
             box_xp.operator("export_scene.xplane_obj", text="Export to OBJ8 (.obj)", icon='EXPORT')
 
 
@@ -141,6 +164,8 @@ if bpy is not None:
 
 else:
     CLASSES = ()
+    XPLANE_OT_repack_textures = None
+    VIEW3D_PT_xplane_bridge = None
 
 
 def register():

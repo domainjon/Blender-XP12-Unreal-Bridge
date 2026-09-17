@@ -482,3 +482,6 @@ if bpy is not None:
                 return {'CANCELLED'}
 
             return {'FINISHED'}
+
+else:
+    EXPORT_SCENE_OT_xplane_obj = None

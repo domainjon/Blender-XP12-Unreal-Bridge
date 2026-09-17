@@ -215,6 +215,10 @@ def export_fbx_for_unreal(
     abs_path = os.path.abspath(filepath)
     os.makedirs(os.path.dirname(abs_path), exist_ok=True)
 
+    # Ensure in OBJECT mode before selecting
+    if bpy.context.active_object and bpy.context.active_object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+
     # Select objects for export
     bpy.ops.object.select_all(action='DESELECT')
 
@@ -226,6 +230,8 @@ def export_fbx_for_unreal(
     if armature_obj:
         armature_obj.select_set(True)
         bpy.context.view_layer.objects.active = armature_obj
+    elif objects and objects[0]:
+        bpy.context.view_layer.objects.active = objects[0]
 
     bpy.ops.export_scene.fbx(
         filepath=abs_path,
@@ -262,7 +268,7 @@ def export_all_for_unreal(
 
     :param output_dir: Output directory for all files
     :param armature_obj: Armature object
-    :param mesh_objects: Mesh objects to export (auto-discovered from armature children if None)
+    :param mesh_objects: Mesh objects to export (auto-discovered from armature children/modifiers if None)
     :param aircraft_name: Aircraft display name
     :return: Dict with paths to 'fbx', 'json', 'csv' files
     """
@@ -271,6 +277,10 @@ def export_all_for_unreal(
 
     if mesh_objects is None and armature_obj and bpy:
         mesh_objects = [child for child in armature_obj.children if child.type == 'MESH']
+        for o in bpy.context.scene.objects:
+            if o.type == 'MESH' and o not in mesh_objects:
+                if any(m.type == 'ARMATURE' and m.object == armature_obj for m in o.modifiers):
+                    mesh_objects.append(o)
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -330,23 +340,62 @@ if bpy is not None:
             arm_obj = None
             mesh_objs = []
 
-            for obj in context.selected_objects:
-                if obj.type == 'ARMATURE':
-                    arm_obj = obj
-                elif obj.type == 'MESH':
-                    mesh_objs.append(obj)
+            # 1. Inspect selection first (filtering out default Blender primitives)
+            selected_armatures = [o for o in context.selected_objects if o.type == 'ARMATURE']
+            selected_meshes = [
+                o for o in context.selected_objects
+                if o.type == 'MESH' and o.name not in ('Cube', 'Light', 'Camera')
+            ]
 
+            if selected_armatures:
+                arm_obj = selected_armatures[0]
+            if selected_meshes:
+                mesh_objs = selected_meshes
+
+            # 2. If no armature in selection, check parent/modifier of selected meshes
             if arm_obj is None:
                 for obj in mesh_objs:
                     if obj.parent and obj.parent.type == 'ARMATURE':
                         arm_obj = obj.parent
                         break
+                    for mod in obj.modifiers:
+                        if mod.type == 'ARMATURE' and mod.object:
+                            arm_obj = mod.object
+                            break
+                    if arm_obj:
+                        break
 
-            if not mesh_objs and arm_obj:
-                mesh_objs = [c for c in arm_obj.children if c.type == 'MESH']
+            # 3. If still no armature found, auto-discover aircraft Armature in scene
+            if arm_obj is None:
+                scene_arms = [o for o in context.scene.objects if o.type == 'ARMATURE']
+                if scene_arms:
+                    best_arm = scene_arms[0]
+                    for a in scene_arms:
+                        has_xp = any(b.get("xp_dataref") for b in a.data.bones)
+                        if has_xp:
+                            best_arm = a
+                            break
+                    arm_obj = best_arm
+
+            # 4. If an armature is found, gather all associated meshes across scene
+            if arm_obj:
+                associated = []
+                for o in context.scene.objects:
+                    if o.type == 'MESH':
+                        if o.parent == arm_obj or any(m.type == 'ARMATURE' and m.object == arm_obj for m in o.modifiers):
+                            associated.append(o)
+                if associated:
+                    mesh_objs = associated
+
+            # 5. If still no mesh objects found, gather all scene meshes (excluding default primitives)
+            if not mesh_objs:
+                mesh_objs = [
+                    o for o in context.scene.objects
+                    if o.type == 'MESH' and o.name not in ('Cube', 'Light', 'Camera')
+                ]
 
             if not mesh_objs:
-                self.report({'ERROR'}, "No mesh objects found for export.")
+                self.report({'ERROR'}, "No aircraft mesh objects found in scene for export.")
                 return {'CANCELLED'}
 
             output_dir = os.path.dirname(self.filepath)
@@ -374,3 +423,7 @@ if bpy is not None:
                 return {'CANCELLED'}
 
             return {'FINISHED'}
+
+else:
+    EXPORT_SCENE_OT_xplane_unreal = None
+

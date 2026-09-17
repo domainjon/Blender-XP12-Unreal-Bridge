@@ -25,7 +25,15 @@ from .constants import (
     ACF_HEADER_IDENTIFIER,
     COCKPIT_KEYWORDS,
 )
-from .import_obj8 import import_obj8_file, parse_obj8, build_mesh
+from .import_obj8 import (
+    import_obj8_file,
+    parse_obj8,
+    build_mesh,
+    mat4_identity,
+    mat4_mul,
+    mat4_translate,
+    mat4_rotate,
+)
 from .anim_rigging import build_unified_armature
 
 
@@ -37,9 +45,41 @@ class ACFAttachedObject:
     abs_path: str
     offset_xp: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     offset_blender: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+    rot_xp: Tuple[float, float, float] = (0.0, 0.0, 0.0)  # (psi=heading, the=pitch, phi=roll) in degrees
     is_cockpit: bool = False
     lighting: int = 0
     exists: bool = False
+
+
+def compute_acf_matrix(offset_xp: Tuple[float, float, float], rot_xp: Tuple[float, float, float]) -> List[List[float]]:
+    """
+    Computes the 4x4 transformation matrix in X-Plane coordinate space for an attached object:
+    rot_xp = (psi, the, phi) in degrees:
+      psi: heading / yaw (around Y_xp)
+      the: pitch (around X_xp)
+      phi: roll (around Z_xp)
+    offset_xp = (x, y, z) in meters
+    Returns 4x4 matrix M_xp = T * R_psi * R_the * R_phi
+    """
+    psi, the, phi = rot_xp
+    x, y, z = offset_xp
+    if (
+        abs(psi) < 1e-6
+        and abs(the) < 1e-6
+        and abs(phi) < 1e-6
+        and abs(x) < 1e-6
+        and abs(y) < 1e-6
+        and abs(z) < 1e-6
+    ):
+        return mat4_identity()
+
+    R_the = mat4_rotate(the, 1.0, 0.0, 0.0)
+    R_psi = mat4_rotate(psi, 0.0, 1.0, 0.0)
+    R_phi = mat4_rotate(phi, 0.0, 0.0, 1.0)
+    R = mat4_mul(R_psi, mat4_mul(R_the, R_phi))
+    T = mat4_translate(x, y, z)
+    return mat4_mul(T, R)
+
 
 
 @dataclass
@@ -103,8 +143,12 @@ def parse_acf(filepath: str) -> ParsedACF:
     # Temporary maps for attached object array properties
     obj_paths: Dict[int, str] = {}
     obj_xyz: Dict[int, List[float]] = {}
+    obj_rot: Dict[int, List[float]] = {}  # [psi, the, phi] in degrees
+    obj_part: Dict[int, int] = {}
+    obj_gear: Dict[int, int] = {}
     obj_is_cockpit: Dict[int, bool] = {}
     obj_lighting: Dict[int, int] = {}
+    gear_coords: Dict[int, List[float]] = {}
     pe_xyz_coords = [0.0, 0.0, 0.0]
 
     for line_str in lines[line_idx:]:
@@ -140,6 +184,25 @@ def parse_acf(filepath: str) -> ParsedACF:
                 except ValueError:
                     pass
 
+            # Landing gear locations: _gear/<idx>/_gear_x, y, z
+            elif prop_key.startswith('_gear/') or prop_key.startswith('acf/_gear/'):
+                parts = prop_key.split('/')
+                g_idx_part = parts[1] if parts[0] == '_gear' else (parts[2] if len(parts) > 2 else "")
+                field_part = parts[-1]
+                if g_idx_part.isdigit():
+                    try:
+                        g_idx = int(g_idx_part)
+                        if g_idx not in gear_coords:
+                            gear_coords[g_idx] = [0.0, 0.0, 0.0]
+                        if field_part == '_gear_x':
+                            gear_coords[g_idx][0] = float(prop_val)
+                        elif field_part == '_gear_y':
+                            gear_coords[g_idx][1] = float(prop_val)
+                        elif field_part == '_gear_z':
+                            gear_coords[g_idx][2] = float(prop_val)
+                    except ValueError:
+                        pass
+
             # Modern X-Plane 11/12 attached objects: _obja/<idx>/<field>
             elif prop_key.startswith('_obja/') or prop_key.startswith('acf/_obja/'):
                 parts = prop_key.split('/')
@@ -163,6 +226,22 @@ def parse_acf(filepath: str) -> ParsedACF:
                             if o_idx not in obj_xyz:
                                 obj_xyz[o_idx] = [0.0, 0.0, 0.0]
                             obj_xyz[o_idx][2] = float(prop_val)
+                        elif field_part == '_v10_att_psi_ref':
+                            if o_idx not in obj_rot:
+                                obj_rot[o_idx] = [0.0, 0.0, 0.0]
+                            obj_rot[o_idx][0] = float(prop_val)
+                        elif field_part == '_v10_att_the_ref':
+                            if o_idx not in obj_rot:
+                                obj_rot[o_idx] = [0.0, 0.0, 0.0]
+                            obj_rot[o_idx][1] = float(prop_val)
+                        elif field_part == '_v10_att_phi_ref':
+                            if o_idx not in obj_rot:
+                                obj_rot[o_idx] = [0.0, 0.0, 0.0]
+                            obj_rot[o_idx][2] = float(prop_val)
+                        elif field_part == '_v10_att_part':
+                            obj_part[o_idx] = int(prop_val)
+                        elif field_part == '_v10_att_gear':
+                            obj_gear[o_idx] = int(prop_val)
                         elif field_part == '_v10_is_internal':
                             try:
                                 v = int(prop_val)
@@ -211,6 +290,44 @@ def parse_acf(filepath: str) -> ParsedACF:
                     except ValueError:
                         pass
 
+            # Legacy X-Plane attached object rotations
+            elif prop_key.startswith('acf/_misc_obj_psi/') or prop_key.startswith('acf/_obj_psi/'):
+                try:
+                    o_idx = int(prop_key.split('/')[-1])
+                    if o_idx not in obj_rot:
+                        obj_rot[o_idx] = [0.0, 0.0, 0.0]
+                    obj_rot[o_idx][0] = float(prop_val)
+                except ValueError:
+                    pass
+            elif prop_key.startswith('acf/_misc_obj_the/') or prop_key.startswith('acf/_obj_the/'):
+                try:
+                    o_idx = int(prop_key.split('/')[-1])
+                    if o_idx not in obj_rot:
+                        obj_rot[o_idx] = [0.0, 0.0, 0.0]
+                    obj_rot[o_idx][1] = float(prop_val)
+                except ValueError:
+                    pass
+            elif prop_key.startswith('acf/_misc_obj_phi/') or prop_key.startswith('acf/_obj_phi/'):
+                try:
+                    o_idx = int(prop_key.split('/')[-1])
+                    if o_idx not in obj_rot:
+                        obj_rot[o_idx] = [0.0, 0.0, 0.0]
+                    obj_rot[o_idx][2] = float(prop_val)
+                except ValueError:
+                    pass
+            elif prop_key.startswith('acf/_misc_obj_part/') or prop_key.startswith('acf/_obj_part/'):
+                try:
+                    o_idx = int(prop_key.split('/')[-1])
+                    obj_part[o_idx] = int(prop_val)
+                except ValueError:
+                    pass
+            elif prop_key.startswith('acf/_misc_obj_gear/') or prop_key.startswith('acf/_obj_gear/'):
+                try:
+                    o_idx = int(prop_key.split('/')[-1])
+                    obj_gear[o_idx] = int(prop_val)
+                except ValueError:
+                    pass
+
             # Attached object cockpit flag
             elif prop_key.startswith('acf/_misc_obj_is_cockpit/'):
                 idx_part = prop_key.split('/')[-1]
@@ -233,6 +350,7 @@ def parse_acf(filepath: str) -> ParsedACF:
 
     # Assemble ACFAttachedObject records
     all_indices = sorted(set(list(obj_paths.keys()) + list(obj_xyz.keys())))
+
     referenced_rel_paths = set()
 
     for idx in all_indices:
@@ -275,7 +393,24 @@ def parse_acf(filepath: str) -> ParsedACF:
                     if file_exists:
                         break
 
-        coords = obj_xyz.get(idx, [0.0, 0.0, 0.0])
+        coords = list(obj_xyz.get(idx, [0.0, 0.0, 0.0]))
+
+        # Check part / gear attachment (Plane Maker part IDs 85..105 correspond to landing gears 0..20)
+        part_id = obj_part.get(idx, -1)
+        gear_idx = -1
+        if 85 <= part_id <= 105:
+            gear_idx = part_id - 85
+        elif obj_gear.get(idx, -1) >= 0:
+            gear_idx = obj_gear.get(idx, -1)
+
+        if gear_idx >= 0 and gear_idx in gear_coords:
+            gx, gy, gz = gear_coords[gear_idx]
+            coords[0] += gx
+            coords[1] += gy
+            coords[2] += gz
+
+        rot_list = obj_rot.get(idx, [0.0, 0.0, 0.0])
+        rot_tuple = (rot_list[0], rot_list[1], rot_list[2])
         xp_offset = (coords[0], coords[1], coords[2])
         bl_offset = xp_to_blender_point(coords[0], coords[1], coords[2])
 
@@ -291,11 +426,13 @@ def parse_acf(filepath: str) -> ParsedACF:
             abs_path=resolved_abs,
             offset_xp=xp_offset,
             offset_blender=bl_offset,
+            rot_xp=rot_tuple,
             is_cockpit=is_cockpit,
             lighting=lighting,
             exists=file_exists
         )
         parsed.attached_objects.append(entry)
+
 
     # Scan objects/ directory for unreferenced .obj files (fallback discovery)
     objects_dir = os.path.join(base_dir, "objects")
@@ -371,8 +508,11 @@ def import_acf_project(
         target_col = cockpit_col if entry.is_cockpit else ext_col
 
         try:
-            # Parse OBJ8 and build mesh
-            parsed_obj = parse_obj8(entry.abs_path)
+            # Compute transformation matrix in X-Plane space (combines offset and Plane Maker rotations)
+            M_xp = compute_acf_matrix(entry.offset_xp, entry.rot_xp)
+
+            # Parse OBJ8 and build mesh with M_xp as initial matrix
+            parsed_obj = parse_obj8(entry.abs_path, initial_matrix=M_xp)
             part_name = os.path.splitext(os.path.basename(entry.abs_path))[0]
             part_obj = build_mesh(
                 parsed_data=parsed_obj,
@@ -381,16 +521,18 @@ def import_acf_project(
                 lod_level=lod_level
             )
 
-            # Apply relative coordinate offset in Blender coordinates
-            part_obj.location = Vector(entry.offset_blender)
+            # Vertices and bones are in unified aircraft coordinates, so origin is at (0, 0, 0)
+            part_obj.location = Vector((0.0, 0.0, 0.0))
 
             # Assign custom metadata properties
             part_obj["acf_is_cockpit"] = 1 if entry.is_cockpit else 0
             part_obj["acf_lighting"] = entry.lighting
             part_obj["acf_rel_path"] = entry.rel_path
             part_obj["acf_offset_xp"] = list(entry.offset_xp)
+            part_obj["acf_rot_xp"] = list(entry.rot_xp)
             part_obj["acf_offset_blender"] = list(entry.offset_blender)
             part_obj["acf_index"] = entry.index
+
 
             # Ensure linked to target collection and unlinked from all other collections
             if part_obj.name not in target_col.objects:
