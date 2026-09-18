@@ -9,8 +9,12 @@ import math
 from typing import Tuple, List, Dict, Any, Optional
 
 # Addon metadata
-ADDON_VERSION = (2, 0, 0)
+ADDON_VERSION = (2, 1, 0)
 BLENDER_MIN_VERSION = (4, 3, 0)
+
+# Unit conversion constants (Plane Maker .acf dimensions are in feet; OBJ8 is in meters)
+FEET_TO_METERS = 0.3048
+METERS_TO_FEET = 1.0 / 0.3048
 
 # ==============================================================================
 # Coordinate Space Conversions

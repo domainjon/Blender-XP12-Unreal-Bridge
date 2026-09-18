@@ -593,9 +593,10 @@ def parse_obj8(filepath: str, initial_matrix: Optional[List[List[float]]] = None
                     )
                     parsed.commands.append(cmd)
 
-                    # Apply rest rotation to active matrix stack
-                    R = mat4_rotate(angle1, ax_xp, ay_xp, az_xp)
-                    matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
+                    # Apply rest rotation to active matrix stack (only for static transforms without dataref)
+                    if not dataref or dataref.lower() in ("none", "no_ref"):
+                        R = mat4_rotate(angle1, ax_xp, ay_xp, az_xp)
+                        matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
                 except ValueError:
                     continue
 
@@ -629,10 +630,12 @@ def parse_obj8(filepath: str, initial_matrix: Optional[List[List[float]]] = None
 
         elif token == TOKEN_ANIM_ROTATE_END:
             if active_rotate_begin and active_rotate_begin.keys:
-                rest_ang = min(active_rotate_begin.keys, key=lambda k: abs(k[0]))[1]
-                raw_ax, raw_ay, raw_az = active_rotate_begin.raw_axis
-                R = mat4_rotate(rest_ang, raw_ax, raw_ay, raw_az)
-                matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
+                dref = active_rotate_begin.dataref
+                if not dref or dref.lower() in ("none", "no_ref"):
+                    rest_ang = min(active_rotate_begin.keys, key=lambda k: abs(k[0]))[1]
+                    raw_ax, raw_ay, raw_az = active_rotate_begin.raw_axis
+                    R = mat4_rotate(rest_ang, raw_ax, raw_ay, raw_az)
+                    matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
             active_rotate_begin = None
             parsed.commands.append(AnimRotateEndCommand())
 

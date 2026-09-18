@@ -248,9 +248,10 @@ def parse_animation_hierarchy(
             target_node.output_min = min(angle1, angle2)
             target_node.output_max = max(angle1, angle2)
 
-            # Update matrix stack
-            R = mat4_rotate(angle1, raw_axis[0], raw_axis[1], raw_axis[2])
-            matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
+            # Update matrix stack (only for static transforms without dataref)
+            if not target_node.dataref or target_node.dataref.lower() in ("none", "no_ref"):
+                R = mat4_rotate(angle1, raw_axis[0], raw_axis[1], raw_axis[2])
+                matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
 
         # 4. ANIM_rotate_begin / keys / end
         elif cmd_type == TOKEN_ANIM_ROTATE_BEGIN or isinstance(cmd, AnimRotateBeginCommand):
@@ -312,11 +313,13 @@ def parse_animation_hierarchy(
         elif cmd_type == TOKEN_ANIM_ROTATE_END or isinstance(cmd, AnimRotateEndCommand):
             if active_rotate_begin_mat:
                 tn = active_rotate_begin_mat['target_node']
-                raw_axis = active_rotate_begin_mat['raw_axis']
-                rest_ang = min(tn.keyframes, key=lambda k: abs(k[0]))[1] if tn.keyframes else 0.0
-                R = mat4_rotate(rest_ang, raw_axis[0], raw_axis[1], raw_axis[2])
-                matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
+                if not tn.dataref or tn.dataref.lower() in ("none", "no_ref"):
+                    raw_axis = active_rotate_begin_mat['raw_axis']
+                    rest_ang = min(tn.keyframes, key=lambda k: abs(k[0]))[1] if tn.keyframes else 0.0
+                    R = mat4_rotate(rest_ang, raw_axis[0], raw_axis[1], raw_axis[2])
+                    matrix_stack[-1] = mat4_mul(matrix_stack[-1], R)
                 active_rotate_begin_mat = None
+            parsed.commands.append(AnimRotateEndCommand())
 
         # 5. ANIM_trans
         elif cmd_type == TOKEN_ANIM_TRANS or isinstance(cmd, AnimTransCommand):

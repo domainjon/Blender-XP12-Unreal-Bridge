@@ -24,6 +24,7 @@ from .constants import (
     xp_to_blender_point,
     ACF_HEADER_IDENTIFIER,
     COCKPIT_KEYWORDS,
+    FEET_TO_METERS,
 )
 from .import_obj8 import (
     import_obj8_file,
@@ -346,7 +347,11 @@ def parse_acf(filepath: str) -> ParsedACF:
                 except ValueError:
                     pass
 
-    parsed.pe_xyz = (pe_xyz_coords[0], pe_xyz_coords[1], pe_xyz_coords[2])
+    parsed.pe_xyz = (
+        pe_xyz_coords[0] * FEET_TO_METERS,
+        pe_xyz_coords[1] * FEET_TO_METERS,
+        pe_xyz_coords[2] * FEET_TO_METERS,
+    )
 
     # Assemble ACFAttachedObject records
     all_indices = sorted(set(list(obj_paths.keys()) + list(obj_xyz.keys())))
@@ -411,8 +416,13 @@ def parse_acf(filepath: str) -> ParsedACF:
 
         rot_list = obj_rot.get(idx, [0.0, 0.0, 0.0])
         rot_tuple = (rot_list[0], rot_list[1], rot_list[2])
-        xp_offset = (coords[0], coords[1], coords[2])
-        bl_offset = xp_to_blender_point(coords[0], coords[1], coords[2])
+        xp_offset = (
+            coords[0] * FEET_TO_METERS,
+            coords[1] * FEET_TO_METERS,
+            coords[2] * FEET_TO_METERS,
+        )
+        bl_offset = xp_to_blender_point(xp_offset[0], xp_offset[1], xp_offset[2])
+
 
         # Determine cockpit status: check path keywords and explicit flag
         lower_rel = norm_rel.lower()
@@ -532,6 +542,25 @@ def import_acf_project(
             part_obj["acf_rot_xp"] = list(entry.rot_xp)
             part_obj["acf_offset_blender"] = list(entry.offset_blender)
             part_obj["acf_index"] = entry.index
+
+            # Hide transonic shock cones (Mach1) or afterburners in viewport by default
+            is_fx = any(kw in part_name.lower() for kw in ('mach1', 'burner', 'afterburner', 'shockcone'))
+            is_hidden_at_rest = False
+            for cmd in parsed_obj.commands:
+                cmd_type = getattr(cmd, 'cmd_type', None)
+                if cmd_type == 'ANIM_HIDE' or (isinstance(cmd, (tuple, list)) and len(cmd) > 0 and cmd[0] == 'ANIM_hide'):
+                    v1 = getattr(cmd, 'val1', cmd[1] if isinstance(cmd, (tuple, list)) and len(cmd) > 1 else 0.0)
+                    v2 = getattr(cmd, 'val2', cmd[2] if isinstance(cmd, (tuple, list)) and len(cmd) > 2 else 0.0)
+                    try:
+                        if float(v1) <= 0.0 <= float(v2):
+                            is_hidden_at_rest = True
+                            break
+                    except (ValueError, TypeError):
+                        pass
+
+            if is_fx or is_hidden_at_rest:
+                part_obj.hide_viewport = True
+                part_obj.hide_render = True
 
 
             # Ensure linked to target collection and unlinked from all other collections
